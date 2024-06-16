@@ -1,0 +1,331 @@
+#include <gtk/gtk.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Function prototypes
+void on_create_user(GtkWidget *widget, gpointer data);
+void on_delete_user(GtkWidget *widget, gpointer data);
+void on_list_users(GtkWidget *widget, gpointer data);
+char* get_root_password();
+gboolean ask_root_permission_and_privileges(const char *username, char *privileges, size_t priv_size);
+
+void on_create_user(GtkWidget *widget, gpointer data) {
+    GtkWidget **entries = (GtkWidget **)data;
+    const char *username = gtk_entry_get_text(GTK_ENTRY(entries[0]));
+    const char *password = gtk_entry_get_text(GTK_ENTRY(entries[1]));
+
+    char privileges[256];
+    // Ask for root permission and privileges
+    if (!ask_root_permission_and_privileges(username, privileges, sizeof(privileges))) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Permission denied by root user.");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
+
+    // Get root password
+    char *root_password = get_root_password();
+    if (root_password == NULL) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Root authentication failed.");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
+
+    // Create user
+    char command[512]; // Increased buffer size
+    snprintf(command, sizeof(command), "echo %s | sudo -S useradd %s", root_password, username);
+    if (system(command) == 0) {
+        snprintf(command, sizeof(command), "echo %s | sudo -S bash -c 'echo \"%s:%s\" | chpasswd'", root_password, username, password);
+        if (system(command) == 0) {
+            // Grant privileges if specified
+            if (strlen(privileges) > 0) {
+                snprintf(command, sizeof(command), "echo %s | sudo -S usermod %s %s", root_password, privileges, username);
+                if (system(command) != 0) {
+                    GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                               GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+                                                               "User %s created, but failed to set some privileges.", username);
+                    gtk_dialog_run(GTK_DIALOG(dialog));
+                    gtk_widget_destroy(dialog);
+                }
+            }
+            GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                       GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                                       "User %s created successfully with password %s.",
+                                                       username, password);
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+        } else {
+            GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                       GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                       "Failed to set password for user %s.", username);
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+        }
+    } else {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Failed to create user %s.", username);
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+    }
+
+    // Clean up
+    free(root_password);
+}
+
+char* get_root_password() {
+    GtkWidget *dialog, *content_area;
+    GtkWidget *label, *password_entry;
+    GtkDialogFlags flags = GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT;
+    char *password;
+
+    dialog = gtk_dialog_new_with_buttons("Root Authentication",
+                                         NULL,
+                                         flags,
+                                         ("_OK"),
+                                         GTK_RESPONSE_OK,
+                                         ("_Cancel"),
+                                         GTK_RESPONSE_CANCEL,
+                                         NULL);
+
+    content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    label = gtk_label_new("Enter root password:");
+    password_entry = gtk_entry_new();
+    gtk_entry_set_visibility(GTK_ENTRY(password_entry), FALSE);
+    gtk_container_add(GTK_CONTAINER(content_area), label);
+    gtk_container_add(GTK_CONTAINER(content_area), password_entry);
+    gtk_widget_show_all(dialog);
+
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    if (response == GTK_RESPONSE_OK) {
+        const char *text = gtk_entry_get_text(GTK_ENTRY(password_entry));
+        password = strdup(text);
+    } else {
+        password = NULL;
+    }
+
+    gtk_widget_destroy(dialog);
+    return password;
+}
+
+gboolean ask_root_permission_and_privileges(const char *username, char *privileges, size_t priv_size) {
+    GtkWidget *dialog, *content_area;
+    GtkWidget *label, *admin_check, *sudo_check, *other_entry;
+    GtkDialogFlags flags = GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT;
+
+    dialog = gtk_dialog_new_with_buttons("Root Permission",
+                                         NULL,
+                                         flags,
+                                         ("_Grant"),
+                                         GTK_RESPONSE_OK,
+                                         ("_Deny"),
+                                         GTK_RESPONSE_CANCEL,
+                                         NULL);
+
+    content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    char message[256];
+    snprintf(message, sizeof(message), "Do you grant permission to create user '%s'? Select privileges:", username);
+    label = gtk_label_new(message);
+    gtk_container_add(GTK_CONTAINER(content_area), label);
+
+    admin_check = gtk_check_button_new_with_label("Admin (add to sudo group)");
+    gtk_container_add(GTK_CONTAINER(content_area), admin_check);
+   
+    sudo_check = gtk_check_button_new_with_label("Sudo (grant sudo privileges)");
+    gtk_container_add(GTK_CONTAINER(content_area), sudo_check);
+
+    label = gtk_label_new("Other (specify usermod options):");
+    gtk_container_add(GTK_CONTAINER(content_area), label);
+
+    other_entry = gtk_entry_new();
+    gtk_container_add(GTK_CONTAINER(content_area), other_entry);
+
+    gtk_widget_show_all(dialog);
+
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    if (response == GTK_RESPONSE_OK) {
+        privileges[0] = '\0'; // Initialize privileges string
+
+        if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(admin_check))) {
+            strncat(privileges, "-aG sudo", priv_size - strlen(privileges) - 1);
+        }
+
+        if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(sudo_check))) {
+            strncat(privileges, " -aG sudo", priv_size - strlen(privileges) - 1);
+        }
+
+        const char *other_privs = gtk_entry_get_text(GTK_ENTRY(other_entry));
+        if (strlen(other_privs) > 0) {
+            strncat(privileges, " ", priv_size - strlen(privileges) - 1);
+            strncat(privileges, other_privs, priv_size - strlen(privileges) - 1);
+        }
+    } else {
+        gtk_widget_destroy(dialog);
+        return FALSE;
+    }
+
+    gtk_widget_destroy(dialog);
+    return TRUE;
+}
+
+void on_delete_user(GtkWidget *widget, gpointer data) {
+    GtkWidget *entry = (GtkWidget *)data;
+    const char *username = gtk_entry_get_text(GTK_ENTRY(entry));
+
+    // Get root password
+    char *root_password = get_root_password();
+    if (root_password == NULL) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Root authentication failed.");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
+
+    // Delete user
+    char command[512]; // Increased buffer size
+    snprintf(command, sizeof(command), "echo %s | sudo -S userdel %s", root_password, username);
+    if (system(command) == 0) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                                   "User %s deleted successfully.", username);
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+    } else {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Failed to delete user %s.", username);
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+    }
+
+    // Clean up
+    free(root_password);
+}
+
+void on_list_users(GtkWidget *widget, gpointer data) {
+    (void)widget;  // Unused parameter
+
+    GtkTextBuffer *buffer = (GtkTextBuffer *)data;
+    FILE *fp = popen("cut -d: -f1 /etc/passwd", "r");
+    if (fp == NULL) {
+        perror("popen");
+        return;
+    }
+
+    char buffer_text[256];
+    gtk_text_buffer_set_text(buffer, "", -1);  // Clear existing text
+
+    while (fgets(buffer_text, sizeof(buffer_text), fp) != NULL) {
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(buffer, &end);
+        gtk_text_buffer_insert(buffer, &end, buffer_text, -1);
+    }
+    pclose(fp);
+}
+
+int main(int argc, char *argv[]) {
+    GtkWidget *window;
+    GtkWidget *notebook;
+    GtkWidget *grid;
+    GtkWidget *label;
+    GtkWidget *username_entry;
+    GtkWidget *password_entry;
+    GtkWidget *button;
+    GtkWidget *delete_entry;
+    GtkWidget *scrolled_window;
+    GtkWidget *text_view;
+    GtkTextBuffer *buffer;
+    GtkWidget *entries[2];
+
+    gtk_init(&argc, &argv);
+
+    // Main window setup
+    window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(window), "User Management");
+    gtk_window_set_default_size(GTK_WINDOW(window), 400, 300);
+    g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+
+    notebook = gtk_notebook_new();
+    gtk_container_add(GTK_CONTAINER(window), notebook);
+
+    // Create User Tab
+    grid = gtk_grid_new();
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 5);
+
+    label = gtk_label_new("Username:");
+    gtk_grid_attach(GTK_GRID(grid), label, 0, 0, 1, 1);
+
+    username_entry = gtk_entry_new();
+    gtk_grid_attach(GTK_GRID(grid), username_entry, 1, 0, 1, 1);
+
+    label = gtk_label_new("Password:");
+    gtk_grid_attach(GTK_GRID(grid), label, 0, 1, 1, 1);
+
+    password_entry = gtk_entry_new();
+    gtk_entry_set_visibility(GTK_ENTRY(password_entry), FALSE);
+    gtk_grid_attach(GTK_GRID(grid), password_entry, 1, 1, 1, 1);
+
+    button = gtk_button_new_with_label("Create User");
+    gtk_grid_attach(GTK_GRID(grid), button, 0, 2, 2, 1);
+
+    entries[0] = username_entry;
+    entries[1] = password_entry;
+    g_signal_connect(button, "clicked", G_CALLBACK(on_create_user), entries);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), grid, gtk_label_new("Create User"));
+
+    // Delete User Tab
+    grid = gtk_grid_new();
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 5);
+
+    label = gtk_label_new("Username:");
+    gtk_grid_attach(GTK_GRID(grid), label, 0, 0, 1, 1);
+
+    delete_entry = gtk_entry_new();
+    gtk_grid_attach(GTK_GRID(grid), delete_entry, 1, 0, 1, 1);
+
+    button = gtk_button_new_with_label("Delete User");
+    gtk_grid_attach(GTK_GRID(grid), button, 0, 1, 2, 1);
+
+    g_signal_connect(button, "clicked", G_CALLBACK(on_delete_user), delete_entry);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), grid, gtk_label_new("Delete User"));
+
+    // List Users Tab
+    grid = gtk_grid_new();
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 5);
+
+    scrolled_window = gtk_scrolled_window_new(NULL, NULL);
+    gtk_widget_set_size_request(scrolled_window, 380, 250);
+    gtk_grid_attach(GTK_GRID(grid), scrolled_window, 0, 0, 2, 1);
+
+    text_view = gtk_text_view_new();
+    buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(text_view));
+    gtk_container_add(GTK_CONTAINER(scrolled_window), text_view);
+
+    button = gtk_button_new_with_label("List Users");
+    gtk_grid_attach(GTK_GRID(grid), button, 0, 1, 2, 1);
+
+    g_signal_connect(button, "clicked", G_CALLBACK(on_list_users), buffer);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), grid, gtk_label_new("List Users"));
+
+    gtk_widget_show_all(window);
+
+    gtk_main();
+
+    return 0;
+}
